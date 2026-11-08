@@ -9,6 +9,7 @@ end
 
 require 'rantly'
 require 'rantly/property'
+require 'rantly/shrinks'
 
 # Generates values and method calls from RBS type signatures.
 #
@@ -21,6 +22,109 @@ class Rantly
 
   class ReturnTypeError < RuntimeError; end
 
+  # A constructor call whose arguments were generated, so it can build a fresh, identical receiver on demand.
+  Construction = Struct.new(:klass, :args, :kwargs, :block) do
+    def call
+      klass.new(*args, **kwargs, &block)
+    end
+
+    def inspect
+      "#{klass}.new(#{RBSSupport.format_arguments(args, kwargs)})"
+    end
+  end
+
+  # A generated call to a method. Implements the interface Rantly::Property uses to shrink failing data: arguments
+  # move towards smaller values (Integer, String, Hash, Array) as long as they still satisfy their RBS type.
+  # Overridden parameters are left alone, since the override may constrain values in ways the signature doesn't.
+  class RBSCall
+    attr_reader :method_type, :args, :kwargs, :block, :receiver
+
+    # @param types [Hash] argument key (position or keyword name) => RBS type, or nil to never shrink it.
+    # @param receiver [Construction, nil] builds the object to call the method on.
+    def initialize(description:, method_type:, args:, kwargs:, block:, receiver:, types:, checker:) # rubocop:disable Metrics/ParameterLists
+      @description = description
+      @method_type = method_type
+      @args = args
+      @kwargs = kwargs
+      @block = block
+      @receiver = receiver
+      @types = types
+      @checker = checker
+      @slots = args.each_index.to_a + kwargs.keys
+      @position = @slots.size - 1
+    end
+
+    def build_receiver
+      @receiver&.call
+    end
+
+    def shrinkable?
+      @slots[0..@position].any? { |key| smaller_value(key) }
+    end
+
+    def retry?
+      shrinkable?
+    end
+
+    # Shrinks the last shrinkable argument not yet tried. Calling again moves on to the one before it.
+    def shrink
+      while @position >= 0
+        key = @slots[@position]
+        @position -= 1
+        smaller = smaller_value(key)
+        return with_value(key, smaller) unless smaller.nil?
+      end
+
+      self
+    end
+
+    def inspect
+      text = "#{@description}(#{RBSSupport.format_arguments(args, kwargs)})"
+      @receiver ? "#{text} on #{@receiver.inspect}" : text
+    end
+    alias to_s inspect
+
+    private
+
+    def value_at(key)
+      key.is_a?(Integer) ? @args[key] : @kwargs[key]
+    end
+
+    def with_value(key, value)
+      args = @args.dup
+      kwargs = @kwargs.dup
+      key.is_a?(Integer) ? args[key] = value : kwargs[key] = value
+
+      self.class.new(description: @description, method_type: @method_type, args: args, kwargs: kwargs, block: @block,
+                     receiver: @receiver, types: @types, checker: @checker)
+    end
+
+    def smaller_value(key)
+      type = @types[key]
+      return unless type
+
+      value = value_at(key)
+      candidate = shrunk_candidate(value)
+      candidate if !candidate.nil? && candidate != value && @checker.value(candidate, type)
+    end
+
+    def shrunk_candidate(value)
+      case value
+      when Array then shrink_array(value)
+      when Integer, String, Hash then value.shrink if value.shrinkable?
+      end
+    end
+
+    # Shrinks the last shrinkable element, and once none can be shrunk drops elements from the end.
+    def shrink_array(array)
+      index = array.rindex { |item| item.respond_to?(:shrinkable?) && item.shrinkable? }
+      return array[0...-1] if index.nil? && !array.empty?
+      return if index.nil?
+
+      array.dup.tap { |copy| copy[index] = copy[index].shrink }
+    end
+  end
+
   # Support for loading signatures. Kept apart from Rantly so the ::RBS constant is never shadowed.
   module RBSSupport
     class << self
@@ -31,6 +135,10 @@ class Rantly
 
         # Loading core signatures is slow, so builders for the default environment are reused.
         (@builders ||= {})[sig] ||= ::RBS::DefinitionBuilder.new(env: build_environment(sig: sig))
+      end
+
+      def format_arguments(args, kwargs)
+        [*args.map(&:inspect), *kwargs.map { |name, value| "#{name}: #{value.inspect}" }].join(', ')
       end
 
       def type_name(klass)
@@ -88,26 +196,40 @@ class Rantly
       method = find_rbs_method(builder, klass, method_name, singleton: singleton)
       checker = ::RBS::Test::TypeCheck.new(self_class: klass, builder: builder, sample_size: 100, unchecked_classes: [])
 
+      description = "#{klass}#{singleton ? '.' : '#'}#{method_name}"
+
       generator = proc do
         method_type = choose(*method.method_types)
-        instance = singleton || receiver ? nil : rbs_new(RBSSupport.type_name(klass), builder, 0)
-        [method_type, *rbs_arguments(method_type, builder, overrides), instance]
+        args, kwargs, block, types = rbs_arguments(method_type, builder, overrides)
+        construction = rbs_construction(RBSSupport.type_name(klass), builder, 0) unless singleton || receiver
+
+        Rantly::RBSCall.new(description: description, method_type: method_type, args: args, kwargs: kwargs,
+                            block: block, receiver: construction, types: types, checker: checker)
       end
 
-      Rantly::Property.new(generator).check(count) do |(method_type, args, kwargs, block, instance)|
-        target = singleton ? klass : (instance || receiver.call)
+      check_with_shrunk_report(Rantly::Property.new(generator), count) do |generated|
+        target = singleton ? klass : (generated.build_receiver || receiver.call)
 
         begin
-          result = target.public_send(method_name, *args, **kwargs, &block)
+          result = target.public_send(method_name, *generated.args, **generated.kwargs, &generated.block)
         rescue *allow_raise
           next
         end
 
-        verify_rbs_return(checker, result, method_type, "#{klass}#{singleton ? '.' : '#'}#{method_name}")
+        verify_rbs_return(checker, result, generated.method_type, description)
       end
     end
 
     private
+
+    # Property#check prints the minimal failing data but leaves it out of the exception. Add it to the message.
+    def check_with_shrunk_report(property, count, &assertion)
+      property.check(count, &assertion)
+    rescue StandardError => e
+      raise unless (shrunk = property.shrunk_failed_data)
+
+      raise e.exception("#{e.message}\nShrunk to: #{shrunk}")
+    end
 
     def verify_rbs_return(checker, result, method_type, description)
       return_type = method_type.type.return_type
@@ -155,14 +277,15 @@ class Rantly
       end
     end
 
-    # Arguments for one call: [positional args, keyword args, block or nil].
+    # Arguments for one call: [positional args, keyword args, block or nil, argument types]. The types map each
+    # argument (by position or keyword name) to its RBS type, or to nil when it came from an override.
     def rbs_arguments(method_type, builder, overrides, depth = 0)
       function = method_type.type
       raise UnsupportedType, "untyped parameters in `#{method_type}`" unless function.is_a?(::RBS::Types::Function)
 
-      args = rbs_positionals(function, builder, overrides, depth)
-      kwargs = rbs_keywords(function, builder, overrides, depth)
-      [args, kwargs, rbs_block(method_type.block, builder, depth)]
+      args, positional_types = rbs_positionals(function, builder, overrides, depth)
+      kwargs, keyword_types = rbs_keywords(function, builder, overrides, depth)
+      [args, kwargs, rbs_block(method_type.block, builder, depth), positional_types.merge(keyword_types)]
     end
 
     private
@@ -170,19 +293,29 @@ class Rantly
     def rbs_positionals(function, builder, overrides, depth)
       optionals = function.optional_positionals.first(range(0, function.optional_positionals.size))
       rest = function.rest_positionals ? Array.new(range(0, 2), function.rest_positionals) : []
+      params = [*function.required_positionals, *optionals, *rest, *function.trailing_positionals]
 
-      [*function.required_positionals, *optionals, *rest, *function.trailing_positionals].map do |param|
-        rbs_param_value(param, builder, overrides, depth)
-      end
+      values = params.map { |param| rbs_param_value(param, builder, overrides, depth) }
+      types = params.each_with_index.to_h { |param, index| [index, overrides.key?(param.name) ? nil : param.type] }
+      [values, types]
     end
 
     def rbs_keywords(function, builder, overrides, depth)
-      required = function.required_keywords
-      optional = function.optional_keywords.select { boolean }
+      named = function.required_keywords.merge(function.optional_keywords.select { boolean })
+      values = named.to_h { |name, param| [name, rbs_param_value(param, builder, overrides, depth, name: name)] }
+      types = named.to_h { |name, param| [name, overrides.key?(name) ? nil : param.type] }
 
-      required.merge(optional).to_h do |name, param|
-        [name, rbs_param_value(param, builder, overrides, depth, name: name)]
-      end
+      extra = rbs_rest_keywords(function, builder, depth)
+      [values.merge(extra), types.merge(extra.transform_values { function.rest_keywords.type })]
+    end
+
+    # `**Type options`: zero to two extra keywords, none of which clash with a keyword the method names.
+    def rbs_rest_keywords(function, builder, depth)
+      return {} unless function.rest_keywords
+
+      taken = function.required_keywords.keys + function.optional_keywords.keys
+      Array.new(range(0, 2)) { [rbs_symbol, rbs_value(function.rest_keywords.type, builder, depth + 1)] }
+           .reject { |name, _| taken.include?(name) }.to_h
     end
 
     def rbs_param_value(param, builder, overrides, depth, name: param.name)
@@ -250,11 +383,15 @@ class Rantly
 
     # Builds an instance by generating arguments for the `new` signature RBS derives from `initialize`.
     def rbs_new(type_name, builder, depth)
+      rbs_construction(type_name, builder, depth).call
+    end
+
+    def rbs_construction(type_name, builder, depth)
       raise UnsupportedType, "`#{type_name}` needs itself to be built" if depth > MAX_NEW_DEPTH
 
       klass, method_types = rbs_constructor(rbs_absolute(type_name), builder)
       args, kwargs, block = rbs_arguments(choose(*method_types), builder, {}, depth + 1)
-      klass.new(*args, **kwargs, &block)
+      Construction.new(klass, args, kwargs, block)
     end
 
     def rbs_constructor(type_name, builder)

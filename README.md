@@ -378,9 +378,24 @@ Rantly.check_method(Calculator, :add, receiver: -> { Calculator.new(precision: 2
 doesn't match the signature. Signatures describe shape rather than meaning, so use `overrides` (keyed by parameter name)
 to narrow arguments the signature can't express.
 
+A failing call is [shrunk](#shrinking) and reported with its receiver:
+
+```
+ArgumentError: 0 successful tests, failed on:
+Greeter#greet(["&", "kh<", "@"]) on Greeter.new(prefix: "YQxoO|")
+
+too many
+
+Shrunk to: Greeter#greet(["", "", ""]) on Greeter.new(prefix: "YQxoO|")
+```
+
+Integers, strings, hashes and arrays are shrunk, but only to values that still match their parameter's RBS type.
+Overridden parameters and the arguments of the receiver's constructor are not shrunk. Requiring `rantly/rbs` also loads
+`rantly/shrinks`.
+
 Supported types: `Integer`, `Float`, `Numeric`, `String`, `Symbol`, `Time`, `bool`, `nil`, `untyped`, literals,
-unions, optionals, `Array`, `Set`, `Hash`, `Range`, tuples, records, type aliases and proc types, plus optional, keyword,
-rest and block parameters. Instances of your own classes are built from the signature of `initialize`. Other types
+unions, optionals, `Array`, `Set`, `Hash`, `Range`, tuples, records, type aliases and proc types, plus optional, rest,
+keyword, keyword-rest (`**opts`) and block parameters. Instances of your own classes are built from the signature of `initialize`. Other types
 (interfaces, generics, classes that require themselves) raise `Rantly::UnsupportedType`; register a generator for a
 class with:
 

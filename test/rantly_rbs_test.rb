@@ -64,6 +64,27 @@ module RBSFixtures
       items.each.to_a.size
     end
 
+    def extras(name:, **options)
+      SEEN << [name, options]
+      options.values.sum
+    end
+
+    def fails_over_ten(number)
+      raise 'too big' if number > 10
+
+      number
+    end
+
+    def long_array(numbers)
+      raise 'too long' if numbers.size > 2
+
+      numbers.size
+    end
+
+    def pick(value)
+      raise "picked #{value}"
+    end
+
     def self.make(number)
       number.to_s
     end
@@ -81,6 +102,10 @@ module RBSFixtures
 
     def deposit(amount)
       @balance += amount
+    end
+
+    def explode(amount)
+      raise "exploded #{amount}"
     end
 
     def merge(other)
@@ -110,6 +135,10 @@ SIG = <<~RBS
       def explode: (Integer) -> void
       def anything: (untyped) -> untyped
       def interface: (_Each[Integer]) -> Integer
+      def extras: (name: String, **Integer options) -> Integer
+      def fails_over_ten: (Integer number) -> Integer
+      def long_array: (Array[Integer] numbers) -> Integer
+      def pick: (5 | 7 value) -> void
       def self.make: (Integer) -> String
     end
 
@@ -117,6 +146,7 @@ SIG = <<~RBS
       def initialize: (owner: String, ?balance: Integer) -> void
       def deposit: (Integer) -> Integer
       def merge: (Account) -> Integer
+      def explode: (Integer amount) -> void
     end
 
     class Node
@@ -287,6 +317,16 @@ describe 'Rantly RBS integration' do
       assert_equal [1, 2], RBSFixtures::SEEN.map(&:last).uniq.sort
     end
 
+    it 'generates keyword rest arguments of the declared type' do
+      Rantly.check_method(RBSFixtures::Calc, :extras, sig: SIG, count: 100)
+
+      options = RBSFixtures::SEEN.map(&:last)
+      assert(options.any?(&:any?))
+      assert(options.any?(&:empty?))
+      assert(options.all? { |hash| hash.all? { |key, value| key.is_a?(Symbol) && value.is_a?(Integer) } })
+      refute(options.any? { |hash| hash.key?(:name) })
+    end
+
     it 'builds the receiver from the initialize signature' do
       Rantly.check_method(RBSFixtures::Account, :deposit, sig: SIG, count: 25)
     end
@@ -310,6 +350,42 @@ describe 'Rantly RBS integration' do
       error = assert_raises(ArgumentError) { check(:nothing_here) }
 
       assert_match(/nothing_here/, error.message)
+    end
+  end
+
+  describe 'shrinking' do
+    def failing_message(method_name, klass: RBSFixtures::Calc, **options)
+      error = assert_raises(RuntimeError) do
+        Rantly.check_method(klass, method_name, sig: SIG, count: 50, **options)
+      end
+      error.message
+    end
+
+    it 'shrinks integer arguments while the call still fails' do
+      shrunk = failing_message(:fails_over_ten)[/Shrunk to: .*fails_over_ten\((-?\d+)\)/, 1]
+
+      assert shrunk, 'expected the message to name a shrunk call'
+      assert((11..21).cover?(shrunk.to_i), "expected 11..21, got #{shrunk}")
+    end
+
+    it 'shrinks array arguments by shrinking then dropping elements' do
+      assert_match(/Shrunk to: .*long_array\(\[0, 0, 0\]\)/, failing_message(:long_array))
+    end
+
+    it 'never shrinks a value outside its declared type' do
+      assert_match(/Shrunk to: .*pick\((5|7)\)/, failing_message(:pick))
+    end
+
+    it 'does not shrink overridden parameters' do
+      message = failing_message(:fails_over_ten, overrides: { number: -> { 100 } })
+
+      assert_match(/Shrunk to: .*fails_over_ten\(100\)/, message)
+    end
+
+    it 'shows the receiver of the failing call' do
+      message = failing_message(:explode, klass: RBSFixtures::Account)
+
+      assert_match(/Shrunk to: .*Account#explode\(.*\) on RBSFixtures::Account\.new\(owner: /, message)
     end
   end
 end
