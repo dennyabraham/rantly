@@ -29,6 +29,7 @@ Gem::Specification.new do |s|
     'lib/rantly/minitest.rb',
     'lib/rantly/minitest_extensions.rb',
     'lib/rantly/property.rb',
+    'lib/rantly/rbs.rb',
     'lib/rantly/rspec.rb',
     'lib/rantly/rspec_extensions.rb',
     'lib/rantly/shrinks.rb',
@@ -36,6 +37,7 @@ Gem::Specification.new do |s|
     'lib/rantly/spec.rb',
     'lib/rantly/testunit_extensions.rb',
     'rantly.gemspec',
+    'test/rantly_rbs_test.rb',
     'test/rantly_test.rb',
     'test/shrinks_test.rb',
     'test/test_helper.rb'

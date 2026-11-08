@@ -352,6 +352,39 @@ RANTLY_VERBOSE=1 # verbose and default if env is not set
 ```
 This will silence the puts, print, and pretty_print statements in property.rb.
 
+# Generating From RBS Signatures (experimental)
+
+With the [rbs](https://github.com/ruby/rbs) gem installed, Rantly can generate values and whole method calls from
+[RBS](https://github.com/ruby/rbs) type signatures:
+
+```ruby
+require 'rantly/rbs'
+
+# Generate a value for any RBS type, inside or outside a property.
+Rantly.value { from_rbs('Array[Integer | nil]') }
+property_of { from_rbs('{ id: Integer, name: String }') }.check { |user| ... }
+
+# Call a method with arguments generated from its signature (loaded from ./sig) and check each
+# return value against the signature.
+Rantly.check_method(Calculator, :add)
+Rantly.check_method(Calculator, :divide, allow_raise: [ZeroDivisionError])
+Rantly.check_method(Calculator, :sqrt, overrides: { number: -> { float(:normal).abs } })
+Rantly.check_method(Calculator, :build, singleton: true)
+Rantly.check_method(Calculator, :add, receiver: -> { Calculator.new(precision: 2) })
+```
+
+`check_method` fails if the method raises an exception that isn't listed in `allow_raise`, or returns a value that
+doesn't match the signature. Signatures describe shape rather than meaning, so use `overrides` (keyed by parameter name)
+to narrow arguments the signature can't express.
+
+Supported types: `Integer`, `Float`, `Numeric`, `String`, `Symbol`, `Time`, `bool`, `nil`, `untyped`, literals,
+unions, optionals, `Array`, `Set`, `Hash`, `Range`, tuples, records, type aliases and proc types, plus optional, keyword,
+rest and block parameters. Other types raise `Rantly::UnsupportedType`; register a generator for a class with:
+
+```ruby
+Rantly.register_rbs_generator('User') { User.new(name: string(:alpha)) }
+```
+
 # Shrinking
 
 Shrinking reduces the value of common types to some terminal lower bound. These functions are added to the Ruby types `Integer`, `String`, `Array`, and `Hash`.

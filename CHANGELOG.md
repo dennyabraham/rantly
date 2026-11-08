@@ -7,6 +7,8 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ### New features
 
+- Experimental: `require 'rantly/rbs'` generates values and method calls from RBS signatures: `from_rbs`, `Rantly.check_method` and `Rantly.register_rbs_generator`. Requires the `rbs` gem.
+
 ### Bug fixes
 
 ### Changes
