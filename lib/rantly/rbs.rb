@@ -33,6 +33,11 @@ class Rantly
         (@builders ||= {})[sig] ||= ::RBS::DefinitionBuilder.new(env: build_environment(sig: sig))
       end
 
+      def type_name(klass)
+        *path, name = klass.name.split('::').map(&:to_sym)
+        ::RBS::TypeName.new(name: name, namespace: ::RBS::Namespace.new(path: path, absolute: true))
+      end
+
       # Forget loaded signatures, e.g. after editing files in ./sig.
       def reset!
         @builders = {}
@@ -85,11 +90,12 @@ class Rantly
 
       generator = proc do
         method_type = choose(*method.method_types)
-        [method_type, *rbs_arguments(method_type, builder, overrides)]
+        instance = singleton || receiver ? nil : rbs_new(RBSSupport.type_name(klass), builder, 0)
+        [method_type, *rbs_arguments(method_type, builder, overrides), instance]
       end
 
-      Rantly::Property.new(generator).check(count) do |(method_type, args, kwargs, block)|
-        target = rbs_target(klass, singleton: singleton, receiver: receiver)
+      Rantly::Property.new(generator).check(count) do |(method_type, args, kwargs, block, instance)|
+        target = singleton ? klass : (instance || receiver.call)
 
         begin
           result = target.public_send(method_name, *args, **kwargs, &block)
@@ -103,12 +109,6 @@ class Rantly
 
     private
 
-    def rbs_target(klass, singleton:, receiver:)
-      return klass if singleton
-
-      receiver ? receiver.call : klass.new
-    end
-
     def verify_rbs_return(checker, result, method_type, description)
       return_type = method_type.type.return_type
       return if checker.value(result, return_type)
@@ -118,8 +118,7 @@ class Rantly
     end
 
     def find_rbs_method(builder, klass, method_name, singleton:)
-      *path, name = klass.name.split('::').map(&:to_sym)
-      type_name = ::RBS::TypeName.new(name: name, namespace: ::RBS::Namespace.new(path: path, absolute: true))
+      type_name = RBSSupport.type_name(klass)
       definition = singleton ? builder.build_singleton(type_name) : builder.build_instance(type_name)
 
       definition.methods[method_name] or
@@ -130,6 +129,8 @@ class Rantly
   # Value generation from RBS types. Included into Rantly, so it can be called inside property blocks.
   module RBSGenerators # rubocop:disable Metrics/ModuleLength
     MAX_DEPTH = 3
+    MAX_NEW_DEPTH = 6
+    CORE_SCALARS = %w[Integer Float Numeric String Symbol NilClass TrueClass FalseClass Object Time].freeze
 
     # @param type [String, RBS::Types::t] an RBS type such as +"Array[Integer | nil]"+
     def from_rbs(type, env: nil, sig: nil)
@@ -243,8 +244,24 @@ class Rantly
       when 'Set' then rbs_array(args.first, builder, depth).to_set
       when 'Hash' then rbs_hash(args, builder, depth)
       when 'Range' then rbs_range(args.first, builder, depth)
-      else rbs_core_scalar(name)
+      else CORE_SCALARS.include?(name) ? rbs_core_scalar(name) : rbs_new(type.name, builder, depth)
       end
+    end
+
+    # Builds an instance by generating arguments for the `new` signature RBS derives from `initialize`.
+    def rbs_new(type_name, builder, depth)
+      raise UnsupportedType, "`#{type_name}` needs itself to be built" if depth > MAX_NEW_DEPTH
+
+      klass, method_types = rbs_constructor(rbs_absolute(type_name), builder)
+      args, kwargs, block = rbs_arguments(choose(*method_types), builder, {}, depth + 1)
+      klass.new(*args, **kwargs, &block)
+    end
+
+    def rbs_constructor(type_name, builder)
+      klass = Object.const_get(type_name.to_s.delete_prefix('::'))
+      [klass, builder.build_singleton(type_name).methods.fetch(:new).method_types]
+    rescue ::RBS::BaseError, NameError, KeyError => e
+      raise UnsupportedType, "no generator for class `#{type_name}`: #{e.message.lines.first&.strip}"
     end
 
     def rbs_core_scalar(name) # rubocop:disable Metrics/CyclomaticComplexity

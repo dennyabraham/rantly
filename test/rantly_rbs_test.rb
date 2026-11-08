@@ -70,6 +70,31 @@ module RBSFixtures
   end
 end
 
+module RBSFixtures
+  class Account
+    attr_reader :owner, :balance
+
+    def initialize(owner:, balance: 0)
+      @owner = owner
+      @balance = balance
+    end
+
+    def deposit(amount)
+      @balance += amount
+    end
+
+    def merge(other)
+      @balance + other.balance
+    end
+  end
+
+  class Node
+    def initialize(link)
+      @link = link
+    end
+  end
+end
+
 SIG = <<~RBS
   module RBSFixtures
     class Calc
@@ -86,6 +111,16 @@ SIG = <<~RBS
       def anything: (untyped) -> untyped
       def interface: (_Each[Integer]) -> Integer
       def self.make: (Integer) -> String
+    end
+
+    class Account
+      def initialize: (owner: String, ?balance: Integer) -> void
+      def deposit: (Integer) -> Integer
+      def merge: (Account) -> Integer
+    end
+
+    class Node
+      def initialize: (Node) -> void
     end
   end
 RBS
@@ -159,6 +194,17 @@ describe 'Rantly RBS integration' do
     it 'raises UnsupportedType for types with no generator' do
       assert_raises(Rantly::UnsupportedType) { Rantly.value { from_rbs('_Each[Integer]') } }
       assert_raises(Rantly::UnsupportedType) { Rantly.value { from_rbs('Rantly::NoSuchClass') } }
+    end
+
+    it 'builds instances of user classes from their initialize signature' do
+      accounts = Array.new(20) { Rantly.value { from_rbs('::RBSFixtures::Account', sig: SIG) } }
+
+      assert(accounts.all?(RBSFixtures::Account))
+      assert(accounts.all? { |account| account.owner.is_a?(String) })
+    end
+
+    it 'gives up on classes that require themselves' do
+      assert_raises(Rantly::UnsupportedType) { Rantly.value { from_rbs('::RBSFixtures::Node', sig: SIG) } }
     end
 
     it 'uses generators registered for a class' do
@@ -239,6 +285,14 @@ describe 'Rantly RBS integration' do
       assert_equal ['fixed'], RBSFixtures::SEEN.map(&:first).uniq
       # `times` is optional: it is either the override or the method's own default.
       assert_equal [1, 2], RBSFixtures::SEEN.map(&:last).uniq.sort
+    end
+
+    it 'builds the receiver from the initialize signature' do
+      Rantly.check_method(RBSFixtures::Account, :deposit, sig: SIG, count: 25)
+    end
+
+    it 'builds arguments that are user classes' do
+      Rantly.check_method(RBSFixtures::Account, :merge, sig: SIG, count: 25)
     end
 
     it 'uses a given receiver' do

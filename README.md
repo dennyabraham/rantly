@@ -370,6 +370,7 @@ Rantly.check_method(Calculator, :add)
 Rantly.check_method(Calculator, :divide, allow_raise: [ZeroDivisionError])
 Rantly.check_method(Calculator, :sqrt, overrides: { number: -> { float(:normal).abs } })
 Rantly.check_method(Calculator, :build, singleton: true)
+# The receiver is built from `initialize`'s signature. Pass `receiver:` to control it.
 Rantly.check_method(Calculator, :add, receiver: -> { Calculator.new(precision: 2) })
 ```
 
@@ -379,7 +380,9 @@ to narrow arguments the signature can't express.
 
 Supported types: `Integer`, `Float`, `Numeric`, `String`, `Symbol`, `Time`, `bool`, `nil`, `untyped`, literals,
 unions, optionals, `Array`, `Set`, `Hash`, `Range`, tuples, records, type aliases and proc types, plus optional, keyword,
-rest and block parameters. Other types raise `Rantly::UnsupportedType`; register a generator for a class with:
+rest and block parameters. Instances of your own classes are built from the signature of `initialize`. Other types
+(interfaces, generics, classes that require themselves) raise `Rantly::UnsupportedType`; register a generator for a
+class with:
 
 ```ruby
 Rantly.register_rbs_generator('User') { User.new(name: string(:alpha)) }
