@@ -352,6 +352,57 @@ RANTLY_VERBOSE=1 # verbose and default if env is not set
 ```
 This will silence the puts, print, and pretty_print statements in property.rb.
 
+# Generating From RBS Signatures (experimental)
+
+With the [rbs](https://github.com/ruby/rbs) gem installed, Rantly can generate values and whole method calls from
+[RBS](https://github.com/ruby/rbs) type signatures:
+
+```ruby
+require 'rantly/rbs'
+
+# Generate a value for any RBS type, inside or outside a property.
+Rantly.value { from_rbs('Array[Integer | nil]') }
+property_of { from_rbs('{ id: Integer, name: String }') }.check { |user| ... }
+
+# Call a method with arguments generated from its signature (loaded from ./sig) and check each
+# return value against the signature.
+Rantly.check_method(Calculator, :add)
+Rantly.check_method(Calculator, :divide, allow_raise: [ZeroDivisionError])
+Rantly.check_method(Calculator, :sqrt, overrides: { number: -> { float(:normal).abs } })
+Rantly.check_method(Calculator, :build, singleton: true)
+# The receiver is built from `initialize`'s signature. Pass `receiver:` to control it.
+Rantly.check_method(Calculator, :add, receiver: -> { Calculator.new(precision: 2) })
+```
+
+`check_method` fails if the method raises an exception that isn't listed in `allow_raise`, or returns a value that
+doesn't match the signature. Signatures describe shape rather than meaning, so use `overrides` (keyed by parameter name)
+to narrow arguments the signature can't express.
+
+A failing call is [shrunk](#shrinking) and reported with its receiver:
+
+```
+ArgumentError: 0 successful tests, failed on:
+Greeter#greet(["&", "kh<", "@"]) on Greeter.new(prefix: "YQxoO|")
+
+too many
+
+Shrunk to: Greeter#greet(["", "", ""]) on Greeter.new(prefix: "YQxoO|")
+```
+
+Integers, strings, hashes and arrays are shrunk, but only to values that still match their parameter's RBS type.
+Overridden parameters and the arguments of the receiver's constructor are not shrunk. Requiring `rantly/rbs` also loads
+`rantly/shrinks`.
+
+Supported types: `Integer`, `Float`, `Numeric`, `String`, `Symbol`, `Time`, `bool`, `nil`, `untyped`, literals,
+unions, optionals, `Array`, `Set`, `Hash`, `Range`, tuples, records, type aliases and proc types, plus optional, rest,
+keyword, keyword-rest (`**opts`) and block parameters. Instances of your own classes are built from the signature of `initialize`. Other types
+(interfaces, generics, classes that require themselves) raise `Rantly::UnsupportedType`; register a generator for a
+class with:
+
+```ruby
+Rantly.register_rbs_generator('User') { User.new(name: string(:alpha)) }
+```
+
 # Shrinking
 
 Shrinking reduces the value of common types to some terminal lower bound. These functions are added to the Ruby types `Integer`, `String`, `Array`, and `Hash`.

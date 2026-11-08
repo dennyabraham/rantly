@@ -6,6 +6,7 @@ group :development, :test do
   gem 'coveralls', '>= 0', require: false
   gem 'minitest',  '~> 5.10.0'
   gem 'rake',      '~> 12.3.3'
+  gem 'rbs'
   gem 'simplecov', '>= 0'
 
   gem 'rubocop'
